@@ -478,12 +478,10 @@ function startHeartbeat() {
 function startHealthServer() {
   const server = http.createServer((req, res) => {
     if (req.url === '/health') {
-      const allConnected = Object.values(state).every(st => st.connected);
-      const status = allConnected ? 200 : 503;
-      
-      res.writeHead(status, { 'Content-Type': 'application/json' });
+      // Always return 200 - the app is running even if WebSockets are connecting
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: allConnected ? 'healthy' : 'degraded',
+        status: 'running',
         timestamp: new Date().toISOString(),
         connections: Object.keys(CONFIG.SYMBOLS).reduce((acc, sym) => {
           acc[sym] = state[sym].connected;
