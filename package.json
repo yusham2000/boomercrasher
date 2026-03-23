@@ -1,15 +1,9 @@
 {
   "name": "boom-crash-spike-detector",
-  "version": "2.2.0",
-  "description": "Boom & Crash spike detector with daily Telegram summary",
+  "version": "2.3.0",
+  "description": "Boom & Crash detector with MT5 auto-trading via PC server",
   "main": "bot.js",
-  "scripts": {
-    "start": "node bot.js"
-  },
-  "dependencies": {
-    "ws": "^8.17.1"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
+  "scripts": { "start": "node bot.js" },
+  "dependencies": { "ws": "^8.17.1" },
+  "engines": { "node": ">=18.0.0" }
 }
