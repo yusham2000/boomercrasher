@@ -1,10 +1,8 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH SPIKE DETECTOR — v2.7
-//  Rebuilt around REAL observed spike intervals (30-200 ticks)
-//  RSI replaced with price momentum (works with short histories)
-//  Signal fires 5 ticks before expected spike
+//  BOOM & CRASH SPIKE DETECTOR — v2.8
+//  v2.0 detection logic (proven working) + auto-trade + daily summary
 // ═══════════════════════════════════════════════════════════════════
 
 const WebSocket = require('ws');
@@ -19,20 +17,18 @@ const CONFIG = {
   PC_SERVER_URL:    process.env.PC_SERVER_URL     || '',
 
   SYMBOLS: {
-    // periods set LOW based on real observed spikes (30-100 ticks)
-    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 80,  direction: 'UP 📈',   pipValue: 0.10 },
-    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 60,  direction: 'UP 📈',   pipValue: 0.10 },
-    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 80,  direction: 'DOWN 📉', pipValue: 0.10 },
-    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 60,  direction: 'DOWN 📉', pipValue: 0.10 },
+    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 1000, direction: 'UP 📈',   pipValue: 0.10 },
+    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 500,  direction: 'UP 📈',   pipValue: 0.10 },
+    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 1000, direction: 'DOWN 📉', pipValue: 0.10 },
+    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 500,  direction: 'DOWN 📉', pipValue: 0.10 },
   },
 
   RISK_DOLLARS:            1.50,
   TP_TICKS:                null,
-  SIGNAL_TICKS_OUT:        5,    // fire 5 ticks before expected spike
-  WARNING_TICKS_OUT:       15,   // warn 15 ticks before
-  SPIKE_DETECT_MULTIPLIER: 8,    // 8x avg move = real spike
-  MIN_TICKS_BEFORE_SIGNAL: 20,   // never signal in first 20 ticks
-  SIGNAL_COOLDOWN_MS:      30000, // 30s cooldown (shorter for fast spikes)
+  SIGNAL_TICKS_OUT:        20,
+  WARNING_TICKS_OUT:       60,
+  SPIKE_DETECT_MULTIPLIER: 6,
+  SIGNAL_COOLDOWN_MS:      90000,
   SUMMARY_HOUR:            21,
   SUMMARY_MINUTE:          0,
 };
@@ -73,17 +69,9 @@ function resetSession() {
   };
 }
 
-// ── Adaptive spike estimator ─────────────────────────────────────────
-// Uses real observed intervals — learns fast
-function _randSpike(period, history) {
-  if (history && history.length >= 2) {
-    const recent = history.slice(-5);
-    const avg    = recent.reduce((a, b) => a + b, 0) / recent.length;
-    const spread = Math.max(avg * 0.25, 10);
-    return Math.max(CONFIG.MIN_TICKS_BEFORE_SIGNAL + 10,
-      Math.floor(avg - spread * 0.2 + Math.random() * spread));
-  }
-  return Math.floor(Math.random() * period * 0.4 + period * 0.6);
+// ── Spike estimator (v2.0 original) ─────────────────────────────────
+function _randSpike(period) {
+  return Math.floor(Math.random() * period * 0.4 + period * 0.7);
 }
 
 // ── State ────────────────────────────────────────────────────────────
@@ -92,57 +80,62 @@ Object.keys(CONFIG.SYMBOLS).forEach(sym => {
   const s = CONFIG.SYMBOLS[sym];
   state[sym] = {
     prices: [], ticks: 0,
-    nextSpike:    _randSpike(s.period, []),
-    avgMove:      0,
-    signalFired:  false, warnFired: false,
+    nextSpike:    _randSpike(s.period),
+    rsi: 50, avgMove: 0,
+    signalFired: false, warnFired: false,
     lastSignalAt: 0, lastPrice: null, entryPrice: null,
-    spikeHistory: [], connected: false, ws: null,
+    connected: false, ws: null,
   };
 });
 
-// ── Average move (last 30 ticks — works with short histories) ────────
+// ── RSI (v2.0 original) ──────────────────────────────────────────────
+function calcRSI(prices, period = 14) {
+  if (prices.length < period + 1) return 50;
+  const slice = prices.slice(-(period + 1));
+  let gains = 0, losses = 0;
+  for (let i = 1; i < slice.length; i++) {
+    const d = slice[i] - slice[i - 1];
+    if (d > 0) gains += d; else losses += Math.abs(d);
+  }
+  if (losses === 0) return 100;
+  const rs = (gains / period) / (losses / period);
+  return parseFloat((100 - 100 / (1 + rs)).toFixed(2));
+}
+
+// ── Average move (v2.0 original) ─────────────────────────────────────
 function calcAvgMove(prices) {
-  if (prices.length < 3) return 1;
-  const recent = prices.slice(-30);
+  if (prices.length < 5) return 1;
+  const recent = prices.slice(-50);
   let total = 0;
   for (let i = 1; i < recent.length; i++) total += Math.abs(recent[i] - recent[i - 1]);
   return total / (recent.length - 1);
 }
 
-// ── Momentum score (replaces RSI — works without long history) ───────
-// Returns 0-1: how strongly price is moving against spike direction
-function calcMomentum(sym) {
+// ── Probability (v2.0 original) ──────────────────────────────────────
+function calcProbability(sym) {
   const s  = CONFIG.SYMBOLS[sym];
   const st = state[sym];
-  if (st.prices.length < 5) return 0.5;
-  const recent = st.prices.slice(-10);
-  let downs = 0, ups = 0, total = 0;
-  for (let i = 1; i < recent.length; i++) {
-    const d = recent[i] - recent[i-1];
-    if (d < 0) downs += Math.abs(d);
-    else ups += d;
-    total += Math.abs(d);
-  }
-  if (total === 0) return 0.5;
-  // boom wants price falling before spike (compression)
-  if (s.type === 'boom') return downs / total;
-  // crash wants price rising before spike
-  return ups / total;
-}
-
-// ── Probability engine ───────────────────────────────────────────────
-function calcProbability(sym) {
-  const st = state[sym];
-
-  // Tick proximity — how close to expected spike
   const rawProx        = Math.min(st.ticks / st.nextSpike, 1);
-  const proximityScore = Math.pow(rawProx, 1.2);
-
-  // Momentum score
-  const momentumScore = calcMomentum(sym);
-
-  const prob = (proximityScore * 0.70 + momentumScore * 0.30) * 100;
-  return Math.min(parseFloat(prob.toFixed(1)), 99.9);
+  const proximityScore = Math.pow(rawProx, 1.8);
+  const rsi = st.rsi;
+  let rsiScore = 0;
+  if (s.type === 'boom') {
+    if (rsi < 30) rsiScore = 1.0; else if (rsi < 45) rsiScore = 0.6; else if (rsi < 55) rsiScore = 0.2;
+  } else {
+    if (rsi > 70) rsiScore = 1.0; else if (rsi > 55) rsiScore = 0.6; else if (rsi > 45) rsiScore = 0.2;
+  }
+  let compressionScore = 0;
+  if (st.prices.length >= 5) {
+    const recent = st.prices.slice(-5);
+    let downs = 0, ups = 0;
+    for (let i = 1; i < recent.length; i++) {
+      if (recent[i] < recent[i-1]) downs++; else ups++;
+    }
+    if (s.type === 'boom' && downs >= 4) compressionScore = 1;
+    else if (s.type === 'crash' && ups >= 4) compressionScore = 1;
+    else if (downs >= 3 || ups >= 3) compressionScore = 0.5;
+  }
+  return Math.min(parseFloat(((proximityScore*0.60 + rsiScore*0.25 + compressionScore*0.15)*100).toFixed(1)), 99.9);
 }
 
 // ── SL/TP ────────────────────────────────────────────────────────────
@@ -157,8 +150,7 @@ function calcSLTP(sym, entryPrice) {
 function sendTelegram(text, silent = false) {
   if (CONFIG.TELEGRAM_TOKEN === 'YOUR_BOT_TOKEN_HERE') { console.log('[TG]\n' + text); return; }
   const body = JSON.stringify({
-    chat_id: CONFIG.TELEGRAM_CHAT_ID, text,
-    parse_mode: 'HTML', disable_notification: silent,
+    chat_id: CONFIG.TELEGRAM_CHAT_ID, text, parse_mode: 'HTML', disable_notification: silent,
   });
   const req = https.request({
     hostname: 'api.telegram.org', path: `/bot${CONFIG.TELEGRAM_TOKEN}/sendMessage`,
@@ -189,20 +181,18 @@ function sendToPC(action, symbol, slPrice) {
 
 // ── Messages ─────────────────────────────────────────────────────────
 function buildWarnMsg(sym, prob, ticksLeft) {
-  const s = CONFIG.SYMBOLS[sym];
-  const mom = (calcMomentum(sym) * 100).toFixed(0);
+  const s = CONFIG.SYMBOLS[sym]; const st = state[sym];
   return (
     `⚠️ <b>PATTERN FORMING — ${s.label}</b>\n` +
     `Probability: <b>${prob}%</b> | Ticks left: ~${ticksLeft}\n` +
-    `Momentum: ${mom}% | Get ready — trade incoming.`
+    `RSI: ${st.rsi} | Get ready — trade incoming.`
   );
 }
 
 function buildSignalMsg(sym, prob, ticksLeft, entryPrice, sl, autoTrade) {
-  const s   = CONFIG.SYMBOLS[sym];
-  const st  = state[sym];
-  const emoji = s.type === 'boom' ? '🚀' : '💥';
-  const mom   = (calcMomentum(sym) * 100).toFixed(0);
+  const s = CONFIG.SYMBOLS[sym]; const st = state[sym];
+  const emoji   = s.type === 'boom' ? '🚀' : '💥';
+  const rsiNote = st.rsi < 30 ? ' (oversold ✅)' : st.rsi > 70 ? ' (overbought ✅)' : '';
   const tradeNote = autoTrade ? `🤖 <b>Auto-trade sent to MT5</b>` : `⚠️ <b>Manual trade needed</b>`;
   return (
     `${emoji} <b>SPIKE SIGNAL — ${s.label.toUpperCase()}</b>\n` +
@@ -210,7 +200,7 @@ function buildSignalMsg(sym, prob, ticksLeft, entryPrice, sl, autoTrade) {
     `🎯 <b>Direction:</b> ${s.direction}\n` +
     `📊 <b>Probability:</b> ${prob}%\n` +
     `🔢 <b>Progress:</b> ${st.ticks} / ~${st.nextSpike} ticks\n` +
-    `⚡ <b>Momentum:</b> ${mom}%\n` +
+    `📈 <b>RSI (14):</b> ${st.rsi}${rsiNote}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `📌 <b>Entry:</b> ~${entryPrice.toFixed(2)}\n` +
     `🛑 <b>SL:</b> ${sl.slPrice.toFixed(2)} (risk $${CONFIG.RISK_DOLLARS.toFixed(2)})\n` +
@@ -227,7 +217,7 @@ function buildSpikeConfirmMsg(sym, move, avgMove, ticksAtSpike, entryPrice, hadS
   const pnlNote = entryPrice && hadSignal ? ` | Est. P&L: +$${(move * s.pipValue).toFixed(2)}` : '';
   const note    = hadSignal
     ? `<i>✅ Closing trade on MT5 now.</i>`
-    : `<i>⚠️ Missed — spike at tick ${ticksAtSpike}. Learning interval.</i>`;
+    : `<i>⚠️ No signal this cycle — spike at tick ${ticksAtSpike}.</i>`;
   return `✅ <b>SPIKE CONFIRMED — ${s.label}</b>\nMove: ${move.toFixed(3)} pts (${(move/avgMove).toFixed(1)}x avg)${pnlNote}\nTicks: ${ticksAtSpike}\n${note}`;
 }
 
@@ -271,28 +261,27 @@ function startDailySummary() {
   }, 60000);
 }
 
-// ── Tick processor ───────────────────────────────────────────────────
+// ── Tick processor (v2.0 logic — proven working) ─────────────────────
 function processTick(sym, price) {
   const st  = state[sym];
   const s   = CONFIG.SYMBOLS[sym];
   const now = Date.now();
 
   st.prices.push(price);
-  if (st.prices.length > 200) st.prices.shift();
+  if (st.prices.length > 500) st.prices.shift();
   st.ticks++;
-  st.avgMove   = calcAvgMove(st.prices);
+  st.rsi      = calcRSI(st.prices);
+  st.avgMove  = calcAvgMove(st.prices);
   st.lastPrice = price;
 
   const prob       = calcProbability(sym);
   const ticksLeft  = Math.max(st.nextSpike - st.ticks, 0);
   const cooldownOk = now - st.lastSignalAt > CONFIG.SIGNAL_COOLDOWN_MS;
 
-  // ── 1. SPIKE DETECTION ───────────────────────────────────────────
-  if (st.prices.length >= 2 && st.ticks >= CONFIG.MIN_TICKS_BEFORE_SIGNAL) {
+  // ── 1. SPIKE DETECTION (v2.0 original — 6x multiplier) ───────────
+  if (st.prices.length >= 2 && st.ticks > 30) {
     const move = Math.abs(price - st.prices[st.prices.length - 2]);
     if (move > st.avgMove * CONFIG.SPIKE_DETECT_MULTIPLIER) {
-      st.spikeHistory.push(st.ticks);
-      if (st.spikeHistory.length > 20) st.spikeHistory.shift();
       const hadSignal = st.signalFired;
       if (hadSignal && st.entryPrice) {
         recordWin(sym, parseFloat((move * s.pipValue).toFixed(2)));
@@ -300,7 +289,7 @@ function processTick(sym, price) {
       } else {
         session.missedSpikes++;
       }
-      console.log(`[SPIKE] ${sym} | move=${move.toFixed(4)} | avg=${st.avgMove.toFixed(4)} | ticks=${st.ticks} | signal=${hadSignal?'YES':'MISSED'} | history=[${st.spikeHistory.slice(-5).join(',')}]`);
+      console.log(`[SPIKE] ${sym} | move=${move.toFixed(4)} | ticks=${st.ticks} | signal=${hadSignal?'YES':'MISSED'}`);
       sendTelegram(buildSpikeConfirmMsg(sym, move, st.avgMove, st.ticks, st.entryPrice, hadSignal));
       _resetState(sym);
       return;
@@ -324,7 +313,6 @@ function processTick(sym, price) {
   if (
     ticksLeft <= CONFIG.WARNING_TICKS_OUT &&
     ticksLeft >  CONFIG.SIGNAL_TICKS_OUT  &&
-    st.ticks  >= CONFIG.MIN_TICKS_BEFORE_SIGNAL &&
     !st.warnFired && cooldownOk
   ) {
     st.warnFired = true;
@@ -334,8 +322,7 @@ function processTick(sym, price) {
   // ── 3. SPIKE SIGNAL ──────────────────────────────────────────────
   if (
     ticksLeft <= CONFIG.SIGNAL_TICKS_OUT &&
-    ticksLeft >= 0 &&
-    st.ticks  >= CONFIG.MIN_TICKS_BEFORE_SIGNAL &&
+    ticksLeft >  0 &&
     !st.signalFired && cooldownOk
   ) {
     st.signalFired  = true;
@@ -347,25 +334,22 @@ function processTick(sym, price) {
     const action    = s.type === 'boom' ? 'BUY' : 'SELL';
     const autoTrade = !!CONFIG.PC_SERVER_URL;
     if (autoTrade) sendToPC(action, sym, sl.slPrice);
-    console.log(`[SIGNAL] ${sym} | prob=${prob}% | ticks=${st.ticks} | nextSpike=${st.nextSpike}`);
+    console.log(`[SIGNAL] ${sym} | prob=${prob}% | ticks=${st.ticks} | ticksLeft=${ticksLeft}`);
     sendTelegram(buildSignalMsg(sym, prob, ticksLeft, price, sl, autoTrade));
   }
 
   // ── 4. SAFETY RESET ──────────────────────────────────────────────
-  if (st.ticks > st.nextSpike * 2.0) {
-    console.log(`[RESET] ${sym} — way past window (ticks=${st.ticks}, expected=${st.nextSpike})`);
+  if (st.ticks > st.nextSpike * 1.5) {
+    console.log(`[RESET] ${sym} — passed window (ticks=${st.ticks})`);
     _resetState(sym);
   }
 }
 
 function _resetState(sym) {
   const s = CONFIG.SYMBOLS[sym]; const st = state[sym];
-  st.ticks = 0;
-  st.nextSpike   = _randSpike(s.period, st.spikeHistory);
+  st.ticks = 0; st.nextSpike = _randSpike(s.period);
   st.signalFired = false; st.warnFired = false; st.entryPrice = null;
-  // Keep last 50 prices for continuity — don't wipe history
-  if (st.prices.length > 50) st.prices = st.prices.slice(-50);
-  console.log(`[STATE] ${sym} reset | nextSpike ~${st.nextSpike} | history=[${st.spikeHistory.slice(-5).join(',')}]`);
+  console.log(`[STATE] ${sym} reset | nextSpike ~${st.nextSpike}`);
 }
 
 // ── Deriv WebSocket ──────────────────────────────────────────────────
@@ -388,7 +372,7 @@ function connectDeriv(sym) {
   });
   ws.on('close', code => {
     st.connected = false;
-    console.log(`[WS] ${sym} closed (${code}) — reconnecting in 5s`);
+    console.log(`[WS] ${sym} closed — reconnecting in 5s`);
     setTimeout(() => connectDeriv(sym), 5000);
   });
   ws.on('error', err => { console.error(`[WS] ${sym}:`, err.message); st.connected = false; });
@@ -401,8 +385,7 @@ function startHeartbeat() {
     Object.keys(CONFIG.SYMBOLS).forEach(sym => {
       const st = state[sym]; const s = CONFIG.SYMBOLS[sym];
       const prob = calcProbability(sym);
-      const mem  = st.spikeHistory.length > 0 ? `[${st.spikeHistory.slice(-5).join(',')}]` : 'learning';
-      console.log(`${st.connected?'🟢':'🔴'} ${s.label.padEnd(12)} | ticks: ${String(st.ticks).padStart(3)}/${st.nextSpike} | prob: ${String(prob).padStart(4)}% | mem: ${mem}`);
+      console.log(`${st.connected?'🟢':'🔴'} ${s.label.padEnd(12)} | ticks: ${String(st.ticks).padStart(4)}/${st.nextSpike} | RSI: ${String(st.rsi).padStart(5)} | prob: ${String(prob).padStart(4)}%`);
     });
     const wr = (session.wins+session.losses)>0 ? ((session.wins/(session.wins+session.losses))*100).toFixed(1)+'%' : '—';
     console.log(`📊 Today: ${session.signals} signals | ${session.wins}W/${session.losses}L | WR:${wr} | P&L:$${session.totalPnl.toFixed(2)}`);
@@ -412,21 +395,19 @@ function startHeartbeat() {
 
 // ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash Spike Detector  v2.7');
+console.log('  Boom & Crash Spike Detector  v2.8');
 console.log('════════════════════════════════════════');
 console.log(`PC Server : ${CONFIG.PC_SERVER_URL || 'NOT SET'}`);
-console.log(`Signal at : ${CONFIG.SIGNAL_TICKS_OUT} ticks before spike`);
-console.log(`Spike det : ${CONFIG.SPIKE_DETECT_MULTIPLIER}x avg move`);
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash Spike Detector v2.7 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash Spike Detector v2.8 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
-  `🔧 Rebuilt around real observed spike intervals\n` +
-  `⚡ Signal fires ${CONFIG.SIGNAL_TICKS_OUT} ticks before spike\n` +
+  `🔧 v2.0 detection logic (proven working)\n` +
   `🤖 Auto-trade: ${CONFIG.PC_SERVER_URL ? '✅ MT5 connected' : '⚠️ PC_SERVER_URL not set'}\n` +
   `🛑 SL risk: $${CONFIG.RISK_DOLLARS} per trade\n` +
+  `📊 Daily summary: ${CONFIG.SUMMARY_HOUR}:${String(CONFIG.SUMMARY_MINUTE).padStart(2,'0')} UTC\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `<i>Scanning for spike patterns...</i>`
 );
