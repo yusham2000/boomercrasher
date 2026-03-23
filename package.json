@@ -1,7 +1,7 @@
 {
   "name": "boom-crash-spike-detector",
-  "version": "2.0.0",
-  "description": "Boom & Crash spike detector with SL/TP — Telegram signals via Deriv live ticks",
+  "version": "2.2.0",
+  "description": "Boom & Crash spike detector with daily Telegram summary",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
