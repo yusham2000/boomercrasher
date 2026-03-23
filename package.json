@@ -1,13 +1,16 @@
 {
   "name": "boom-crash-spike-detector",
-  "version": "2.0.0",
-  "description": "Boom & Crash spike detector with SL/TP — Telegram signals via Deriv live ticks",
+  "version": "3.0.0",
+  "description": "Boom & Crash spike detector with SQLite trade history and REST API",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "ws": "^8.17.1"
+    "ws": "^8.17.1",
+    "better-sqlite3": "^9.4.3",
+    "express": "^4.18.3",
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"
