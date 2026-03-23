@@ -19,10 +19,10 @@ const CONFIG = {
   PC_SERVER_URL:    process.env.PC_SERVER_URL     || '',
 
   SYMBOLS: {
-    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 1000, direction: 'UP 📈',   pipValue: 0.10, minSpikeTicks: 200 },
-    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 500,  direction: 'UP 📈',   pipValue: 0.10, minSpikeTicks: 100 },
-    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 1000, direction: 'DOWN 📉', pipValue: 0.10, minSpikeTicks: 200 },
-    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 500,  direction: 'DOWN 📉', pipValue: 0.10, minSpikeTicks: 100 },
+    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 1000, direction: 'UP 📈',   pipValue: 0.10, minSpikeTicks: 30 },
+    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 500,  direction: 'UP 📈',   pipValue: 0.10, minSpikeTicks: 30 },
+    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 1000, direction: 'DOWN 📉', pipValue: 0.10, minSpikeTicks: 30 },
+    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 500,  direction: 'DOWN 📉', pipValue: 0.10, minSpikeTicks: 30 },
   },
 
   RISK_DOLLARS:            1.50,
@@ -32,7 +32,7 @@ const CONFIG = {
   PROB_OVERRIDE_THRESHOLD: 85,
 
   // ── Raised from 5 to 15 — only genuine spike candles qualify ──────
-  SPIKE_DETECT_MULTIPLIER: 15,
+  SPIKE_DETECT_MULTIPLIER: 6,
 
   SIGNAL_COOLDOWN_MS: 90000,
   SUMMARY_HOUR:       21,
@@ -127,7 +127,7 @@ function calcAvgMove(prices) {
 function calcProbability(sym) {
   const s  = CONFIG.SYMBOLS[sym];
   const st = state[sym];
-  const openAt         = st.nextSpike * 0.30;
+  const openAt         = st.nextSpike * 0.05;
   const elapsed        = Math.max(0, st.ticks - openAt);
   const window         = st.nextSpike - openAt;
   const rawProx        = window > 0 ? Math.min(elapsed / window, 1) : 0;
