@@ -1,7 +1,7 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH SPIKE DETECTOR — v2.8
+//  BOOM & CRASH SPIKE DETECTOR — v2.9
 //  v2.0 detection logic (proven working) + auto-trade + daily summary
 // ═══════════════════════════════════════════════════════════════════
 
@@ -17,10 +17,10 @@ const CONFIG = {
   PC_SERVER_URL:    process.env.PC_SERVER_URL     || '',
 
   SYMBOLS: {
-    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 1000, direction: 'UP 📈',   pipValue: 0.10 },
-    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 500,  direction: 'UP 📈',   pipValue: 0.10 },
-    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 1000, direction: 'DOWN 📉', pipValue: 0.10 },
-    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 500,  direction: 'DOWN 📉', pipValue: 0.10 },
+    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 200, direction: 'UP 📈',   pipValue: 0.10 },
+    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 150,  direction: 'UP 📈',   pipValue: 0.10 },
+    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 200, direction: 'DOWN 📉', pipValue: 0.10 },
+    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 100,  direction: 'DOWN 📉', pipValue: 0.10 },
   },
 
   RISK_DOLLARS:            1.50,
@@ -70,7 +70,13 @@ function resetSession() {
 }
 
 // ── Spike estimator (v2.0 original) ─────────────────────────────────
-function _randSpike(period) {
+function _randSpike(period, history) {
+  if (history && history.length >= 1) {
+    const recent = history.slice(-5);
+    const avg    = recent.reduce((a, b) => a + b, 0) / recent.length;
+    const spread = Math.max(avg * 0.3, 20);
+    return Math.max(25, Math.floor(avg - spread * 0.1 + Math.random() * spread));
+  }
   return Math.floor(Math.random() * period * 0.4 + period * 0.7);
 }
 
@@ -82,7 +88,7 @@ Object.keys(CONFIG.SYMBOLS).forEach(sym => {
     prices: [], ticks: 0,
     nextSpike:    _randSpike(s.period),
     rsi: 50, avgMove: 0,
-    signalFired: false, warnFired: false,
+    signalFired: false, warnFired: false, spikeHistory: [],
     lastSignalAt: 0, lastPrice: null, entryPrice: null,
     connected: false, ws: null,
   };
@@ -282,6 +288,8 @@ function processTick(sym, price) {
   if (st.prices.length >= 2 && st.ticks > 30) {
     const move = Math.abs(price - st.prices[st.prices.length - 2]);
     if (move > st.avgMove * CONFIG.SPIKE_DETECT_MULTIPLIER) {
+      st.spikeHistory.push(st.ticks);
+      if (st.spikeHistory.length > 10) st.spikeHistory.shift();
       const hadSignal = st.signalFired;
       if (hadSignal && st.entryPrice) {
         recordWin(sym, parseFloat((move * s.pipValue).toFixed(2)));
@@ -347,7 +355,7 @@ function processTick(sym, price) {
 
 function _resetState(sym) {
   const s = CONFIG.SYMBOLS[sym]; const st = state[sym];
-  st.ticks = 0; st.nextSpike = _randSpike(s.period);
+  st.ticks = 0; st.nextSpike = _randSpike(s.period, st.spikeHistory);
   st.signalFired = false; st.warnFired = false; st.entryPrice = null;
   console.log(`[STATE] ${sym} reset | nextSpike ~${st.nextSpike}`);
 }
@@ -395,13 +403,13 @@ function startHeartbeat() {
 
 // ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash Spike Detector  v2.8');
+console.log('  Boom & Crash Spike Detector  v2.9');
 console.log('════════════════════════════════════════');
 console.log(`PC Server : ${CONFIG.PC_SERVER_URL || 'NOT SET'}`);
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash Spike Detector v2.8 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash Spike Detector v2.9 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
   `🔧 v2.0 detection logic (proven working)\n` +
