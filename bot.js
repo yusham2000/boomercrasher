@@ -1,60 +1,48 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH SPIKE DETECTOR — v2.3
-//  Auto-trades via PC server → MT5 EA
-//  Adaptive spike memory + SL/TP + Daily summary
+//  BOOM & CRASH SPIKE DETECTOR — v2.4
+//  Fixed: spike detection threshold raised to prevent false resets
+//  Fixed: minimum tick guard before any signal or reset
+//  Fixed: signal window opens earlier (30% of cycle)
 // ═══════════════════════════════════════════════════════════════════
 
 const WebSocket = require('ws');
 const https     = require('https');
 const http      = require('http');
 
-// ───────────────────────────────────────────────────────────────────
-//  CONFIGURATION
-// ───────────────────────────────────────────────────────────────────
 const CONFIG = {
   TELEGRAM_TOKEN:   process.env.TELEGRAM_TOKEN   || 'YOUR_BOT_TOKEN_HERE',
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || 'YOUR_CHAT_ID_HERE',
   DERIV_APP_ID:     process.env.DERIV_APP_ID     || '1089',
   DERIV_WS:         'wss://ws.binaryws.com/websockets/v3',
-
-  // ── Your PC public URL from ngrok ─────────────────────────────────
-  // After starting ngrok, paste your URL here and redeploy
-  // Example: 'https://abc123.ngrok-free.app'
-  PC_SERVER_URL: process.env.PC_SERVER_URL || '',
+  PC_SERVER_URL:    process.env.PC_SERVER_URL     || '',
 
   SYMBOLS: {
-    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 1000, direction: 'UP 📈',   pipValue: 0.10 },
-    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 500,  direction: 'UP 📈',   pipValue: 0.10 },
-    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 1000, direction: 'DOWN 📉', pipValue: 0.10 },
-    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 500,  direction: 'DOWN 📉', pipValue: 0.10 },
+    'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 1000, direction: 'UP 📈',   pipValue: 0.10, minSpikeTicks: 200 },
+    'BOOM500':   { label: 'Boom 500',   type: 'boom',  period: 500,  direction: 'UP 📈',   pipValue: 0.10, minSpikeTicks: 100 },
+    'CRASH1000': { label: 'Crash 1000', type: 'crash', period: 1000, direction: 'DOWN 📉', pipValue: 0.10, minSpikeTicks: 200 },
+    'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 500,  direction: 'DOWN 📉', pipValue: 0.10, minSpikeTicks: 100 },
   },
 
   RISK_DOLLARS:            1.50,
   TP_TICKS:                null,
   SIGNAL_TICKS_OUT:        20,
   WARNING_TICKS_OUT:       60,
-  PROB_OVERRIDE_THRESHOLD: 80,
-  SPIKE_DETECT_MULTIPLIER: 5,
-  SIGNAL_COOLDOWN_MS:      90000,
+  PROB_OVERRIDE_THRESHOLD: 85,
 
-  SUMMARY_HOUR:   21,
-  SUMMARY_MINUTE: 0,
+  // ── Raised from 5 to 15 — only genuine spike candles qualify ──────
+  SPIKE_DETECT_MULTIPLIER: 15,
+
+  SIGNAL_COOLDOWN_MS: 90000,
+  SUMMARY_HOUR:       21,
+  SUMMARY_MINUTE:     0,
 };
 
-// ───────────────────────────────────────────────────────────────────
-//  SESSION STATS
-// ───────────────────────────────────────────────────────────────────
+// ── Session stats ────────────────────────────────────────────────────
 let session = {
-  startedAt:    new Date(),
-  signals:      0,
-  wins:         0,
-  losses:       0,
-  missedSpikes: 0,
-  totalPnl:     0,
-  bestTrade:    null,
-  worstTrade:   null,
+  startedAt: new Date(), signals: 0, wins: 0, losses: 0,
+  missedSpikes: 0, totalPnl: 0, bestTrade: null, worstTrade: null,
   bySymbol: {
     'BOOM1000':  { signals: 0, wins: 0, losses: 0, pnl: 0 },
     'BOOM500':   { signals: 0, wins: 0, losses: 0, pnl: 0 },
@@ -64,24 +52,16 @@ let session = {
 };
 
 function recordWin(sym, pnl) {
-  session.wins++;
-  session.totalPnl += pnl;
-  session.bySymbol[sym].wins++;
-  session.bySymbol[sym].pnl += pnl;
-  if (!session.bestTrade || pnl > session.bestTrade.pnl)
-    session.bestTrade = { sym, pnl };
+  session.wins++; session.totalPnl += pnl;
+  session.bySymbol[sym].wins++; session.bySymbol[sym].pnl += pnl;
+  if (!session.bestTrade || pnl > session.bestTrade.pnl) session.bestTrade = { sym, pnl };
 }
-
 function recordLoss(sym) {
   const pnl = -CONFIG.RISK_DOLLARS;
-  session.losses++;
-  session.totalPnl += pnl;
-  session.bySymbol[sym].losses++;
-  session.bySymbol[sym].pnl += pnl;
-  if (!session.worstTrade || pnl < session.worstTrade.pnl)
-    session.worstTrade = { sym, pnl };
+  session.losses++; session.totalPnl += pnl;
+  session.bySymbol[sym].losses++; session.bySymbol[sym].pnl += pnl;
+  if (!session.worstTrade || pnl < session.worstTrade.pnl) session.worstTrade = { sym, pnl };
 }
-
 function resetSession() {
   session = {
     startedAt: new Date(), signals: 0, wins: 0, losses: 0,
@@ -95,65 +75,18 @@ function resetSession() {
   };
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  PC SERVER — send trade commands to MT5 via your PC
-// ───────────────────────────────────────────────────────────────────
-function sendToPC(action, symbol, slPrice) {
-  if (!CONFIG.PC_SERVER_URL) {
-    console.log(`[PC] PC_SERVER_URL not set — skipping trade execution`);
-    return;
-  }
-
-  const body    = JSON.stringify({ action, symbol, slPrice });
-  const url     = new URL(CONFIG.PC_SERVER_URL);
-  const isHttps = url.protocol === 'https:';
-  const lib     = isHttps ? https : http;
-
-  const options = {
-    hostname: url.hostname,
-    port:     url.port || (isHttps ? 443 : 80),
-    path:     '/signal',
-    method:   'POST',
-    headers:  {
-      'Content-Type':   'application/json',
-      'Content-Length': Buffer.byteLength(body),
-    },
-  };
-
-  const req = lib.request(options, res => {
-    let data = '';
-    res.on('data', c => (data += c));
-    res.on('end', () => {
-      console.log(`[PC] Response: ${data}`);
-    });
-  });
-
-  req.on('error', err => {
-    console.error(`[PC] Failed to reach PC server: ${err.message}`);
-    sendTelegram(`⚠️ <b>PC server unreachable</b>\nCould not send ${action} for ${symbol}\nCheck ngrok and local server are running.`);
-  });
-
-  req.write(body);
-  req.end();
-  console.log(`[PC] Sent ${action} ${symbol} SL=${slPrice} to PC server`);
-}
-
-// ───────────────────────────────────────────────────────────────────
-//  ADAPTIVE SPIKE ESTIMATOR
-// ───────────────────────────────────────────────────────────────────
+// ── Adaptive spike estimator ─────────────────────────────────────────
 function _randSpike(period, history) {
   if (history && history.length >= 3) {
     const recent = history.slice(-5);
     const avg    = recent.reduce((a, b) => a + b, 0) / recent.length;
     const spread = period * 0.20;
-    return Math.max(30, Math.floor(avg - spread * 0.3 + Math.random() * spread));
+    return Math.max(50, Math.floor(avg - spread * 0.3 + Math.random() * spread));
   }
   return Math.floor(Math.random() * period * 0.30 + period * 0.60);
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  STATE
-// ───────────────────────────────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────────
 const state = {};
 Object.keys(CONFIG.SYMBOLS).forEach(sym => {
   const s = CONFIG.SYMBOLS[sym];
@@ -167,9 +100,7 @@ Object.keys(CONFIG.SYMBOLS).forEach(sym => {
   };
 });
 
-// ───────────────────────────────────────────────────────────────────
-//  INDICATORS
-// ───────────────────────────────────────────────────────────────────
+// ── RSI ──────────────────────────────────────────────────────────────
 function calcRSI(prices, period = 14) {
   if (prices.length < period + 1) return 50;
   const slice = prices.slice(-(period + 1));
@@ -183,21 +114,20 @@ function calcRSI(prices, period = 14) {
   return parseFloat((100 - 100 / (1 + rs)).toFixed(2));
 }
 
+// ── Average move (uses last 100 ticks for stability) ─────────────────
 function calcAvgMove(prices) {
-  if (prices.length < 5) return 1;
-  const recent = prices.slice(-50);
+  if (prices.length < 10) return 1;
+  const recent = prices.slice(-100);
   let total = 0;
   for (let i = 1; i < recent.length; i++) total += Math.abs(recent[i] - recent[i - 1]);
   return total / (recent.length - 1);
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  PROBABILITY ENGINE
-// ───────────────────────────────────────────────────────────────────
+// ── Probability engine ───────────────────────────────────────────────
 function calcProbability(sym) {
   const s  = CONFIG.SYMBOLS[sym];
   const st = state[sym];
-  const openAt         = st.nextSpike * 0.40;
+  const openAt         = st.nextSpike * 0.30;
   const elapsed        = Math.max(0, st.ticks - openAt);
   const window         = st.nextSpike - openAt;
   const rawProx        = window > 0 ? Math.min(elapsed / window, 1) : 0;
@@ -223,65 +153,57 @@ function calcProbability(sym) {
   return Math.min(parseFloat(((proximityScore * 0.60 + rsiScore * 0.25 + compressionScore * 0.15) * 100).toFixed(1)), 99.9);
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  SL / TP
-// ───────────────────────────────────────────────────────────────────
+// ── SL/TP ────────────────────────────────────────────────────────────
 function calcSLTP(sym, entryPrice) {
   const s          = CONFIG.SYMBOLS[sym];
   const slDistance = CONFIG.RISK_DOLLARS / s.pipValue;
   const slPrice    = s.type === 'boom' ? entryPrice - slDistance : entryPrice + slDistance;
-  const tpNote     = 'Exit when spike candle closes';
-  return { slDistance, slPrice, tpNote };
+  return { slDistance, slPrice, tpNote: 'Exit when spike candle closes' };
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  TELEGRAM
-// ───────────────────────────────────────────────────────────────────
+// ── Telegram ─────────────────────────────────────────────────────────
 function sendTelegram(text, silent = false) {
-  if (CONFIG.TELEGRAM_TOKEN === 'YOUR_BOT_TOKEN_HERE') {
-    console.log('[TELEGRAM]\n' + text + '\n'); return;
-  }
-  const body = JSON.stringify({
-    chat_id: CONFIG.TELEGRAM_CHAT_ID, text,
-    parse_mode: 'HTML', disable_notification: silent,
-  });
+  if (CONFIG.TELEGRAM_TOKEN === 'YOUR_BOT_TOKEN_HERE') { console.log('[TELEGRAM]\n' + text); return; }
+  const body = JSON.stringify({ chat_id: CONFIG.TELEGRAM_CHAT_ID, text, parse_mode: 'HTML', disable_notification: silent });
   const req = https.request({
-    hostname: 'api.telegram.org',
-    path: `/bot${CONFIG.TELEGRAM_TOKEN}/sendMessage`,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-  }, res => {
-    let data = '';
-    res.on('data', c => (data += c));
-    res.on('end', () => {
-      try { const p = JSON.parse(data); if (!p.ok) console.error('[Telegram]', p.description); } catch (_) {}
-    });
-  });
-  req.on('error', err => console.error('[Telegram error]', err.message));
+    hostname: 'api.telegram.org', path: `/bot${CONFIG.TELEGRAM_TOKEN}/sendMessage`,
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+  }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { const p = JSON.parse(d); if (!p.ok) console.error('[TG]', p.description); } catch(_){} }); });
+  req.on('error', e => console.error('[TG error]', e.message));
   req.write(body); req.end();
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  MESSAGES
-// ───────────────────────────────────────────────────────────────────
-function buildWarningMessage(sym, prob, ticksLeft) {
-  const s = CONFIG.SYMBOLS[sym];
-  return (
-    `⚠️ <b>PATTERN FORMING — ${s.label}</b>\n` +
-    `Probability: <b>${prob}%</b> | Ticks left: ~${ticksLeft}\n` +
-    `RSI: ${state[sym].rsi} | Get ready — trade incoming.`
-  );
+// ── PC server (MT5) ──────────────────────────────────────────────────
+function sendToPC(action, symbol, slPrice) {
+  if (!CONFIG.PC_SERVER_URL) { console.log(`[PC] URL not set — skipping`); return; }
+  const body = JSON.stringify({ action, symbol, slPrice });
+  const url  = new URL(CONFIG.PC_SERVER_URL);
+  const lib  = url.protocol === 'https:' ? https : http;
+  const req  = lib.request({
+    hostname: url.hostname, port: url.port || (url.protocol === 'https:' ? 443 : 80),
+    path: '/signal', method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+  }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => console.log(`[PC] Response: ${d}`)); });
+  req.on('error', err => {
+    console.error(`[PC] Unreachable: ${err.message}`);
+    sendTelegram(`⚠️ <b>PC server unreachable</b>\nCould not send ${action} for ${symbol}\nCheck ngrok and start.bat are running.`);
+  });
+  req.write(body); req.end();
+  console.log(`[PC] Sent ${action} ${symbol} SL=${slPrice}`);
 }
 
-function buildSignalMessage(sym, prob, ticksLeft, entryPrice, sl, trigger, autoTrade) {
-  const s       = CONFIG.SYMBOLS[sym];
-  const st      = state[sym];
-  const now     = new Date().toUTCString();
-  const emoji   = s.type === 'boom' ? '🚀' : '💥';
+// ── Messages ─────────────────────────────────────────────────────────
+function buildWarningMsg(sym, prob, ticksLeft) {
+  const s = CONFIG.SYMBOLS[sym];
+  return `⚠️ <b>PATTERN FORMING — ${s.label}</b>\nProbability: <b>${prob}%</b> | Ticks left: ~${ticksLeft}\nRSI: ${state[sym].rsi} | Get ready — trade incoming.`;
+}
+
+function buildSignalMsg(sym, prob, ticksLeft, entryPrice, sl, trigger, autoTrade) {
+  const s = CONFIG.SYMBOLS[sym]; const st = state[sym];
+  const emoji = s.type === 'boom' ? '🚀' : '💥';
   const rsiNote = st.rsi < 30 ? ' (oversold ✅)' : st.rsi > 70 ? ' (overbought ✅)' : '';
-  const tradeNote = autoTrade
-    ? `🤖 <b>Auto-trade sent to MT5</b>`
-    : `⚠️ <b>Manual trade needed</b> (PC server offline)`;
+  const tradeNote = autoTrade ? `🤖 <b>Auto-trade sent to MT5</b>` : `⚠️ <b>Manual trade needed</b> (PC server offline)`;
+  const triggerNote = trigger === 'prob' ? `⚡ High probability (${prob}%)` : `⏱ Tick window (~${ticksLeft} left)`;
   return (
     `${emoji} <b>SPIKE SIGNAL — ${s.label.toUpperCase()}</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -294,38 +216,32 @@ function buildSignalMessage(sym, prob, ticksLeft, entryPrice, sl, trigger, autoT
     `🛑 <b>SL:</b> ${sl.slPrice.toFixed(2)} (risk $${CONFIG.RISK_DOLLARS.toFixed(2)})\n` +
     `💰 <b>TP:</b> ${sl.tpNote}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `${tradeNote}\n` +
-    `🕐 <i>${now}</i>`
+    `${tradeNote}\n<i>${triggerNote}</i>\n🕐 <i>${new Date().toUTCString()}</i>`
   );
 }
 
-function buildSpikeConfirmMessage(sym, move, avgMove, ticksAtSpike, entryPrice, hadSignal) {
-  const s       = CONFIG.SYMBOLS[sym];
+function buildSpikeConfirmMsg(sym, move, avgMove, ticksAtSpike, entryPrice, hadSignal) {
+  const s = CONFIG.SYMBOLS[sym];
   const pnlNote = entryPrice && hadSignal ? ` | Est. P&L: +$${(move * s.pipValue).toFixed(2)}` : '';
-  const note    = hadSignal
+  const note = hadSignal
     ? `<i>✅ Closing trade on MT5 now.</i>`
-    : `<i>⚠️ No signal this cycle — spike at tick ${ticksAtSpike}.</i>`;
-  return (
-    `✅ <b>SPIKE CONFIRMED — ${s.label}</b>\n` +
-    `Move: ${move.toFixed(3)} pts (${(move / avgMove).toFixed(1)}x avg)${pnlNote}\n` +
-    `Ticks at spike: ${ticksAtSpike}\n${note}`
-  );
+    : `<i>⚠️ No signal this cycle — spike at tick ${ticksAtSpike}. Interval recorded.</i>`;
+  return `✅ <b>SPIKE CONFIRMED — ${s.label}</b>\nMove: ${move.toFixed(3)} pts (${(move / avgMove).toFixed(1)}x avg)${pnlNote}\nTicks at spike: ${ticksAtSpike}\n${note}`;
 }
 
 function buildDailySummary() {
-  const total   = session.wins + session.losses;
+  const total = session.wins + session.losses;
   const winRate = total > 0 ? ((session.wins / total) * 100).toFixed(1) : '0.0';
-  const pnl     = session.totalPnl;
-  const emoji   = pnl > 0 ? '🟢' : pnl < 0 ? '🔴' : '⚪';
+  const pnl = session.totalPnl;
+  const emoji = pnl > 0 ? '🟢' : pnl < 0 ? '🔴' : '⚪';
   const symRows = Object.keys(CONFIG.SYMBOLS).map(sym => {
-    const r  = session.bySymbol[sym];
-    const s  = CONFIG.SYMBOLS[sym];
+    const r = session.bySymbol[sym]; const s = CONFIG.SYMBOLS[sym];
     const wr = (r.wins + r.losses) > 0 ? ((r.wins / (r.wins + r.losses)) * 100).toFixed(0) + '%' : '—';
-    const p  = r.pnl >= 0 ? `+$${r.pnl.toFixed(2)}` : `-$${Math.abs(r.pnl).toFixed(2)}`;
+    const p = r.pnl >= 0 ? `+$${r.pnl.toFixed(2)}` : `-$${Math.abs(r.pnl).toFixed(2)}`;
     return `  ${s.label}: ${r.wins}W/${r.losses}L  WR:${wr}  ${p}`;
   }).join('\n');
-  const bestLine  = session.bestTrade ? `🏆 Best:  +$${session.bestTrade.pnl.toFixed(2)} (${CONFIG.SYMBOLS[session.bestTrade.sym].label})` : '🏆 Best:  —';
-  const worstLine = session.worstTrade ? `💔 Worst: -$${Math.abs(session.worstTrade.pnl).toFixed(2)} (${CONFIG.SYMBOLS[session.worstTrade.sym].label})` : '💔 Worst: —';
+  const best  = session.bestTrade  ? `🏆 Best:  +$${session.bestTrade.pnl.toFixed(2)} (${CONFIG.SYMBOLS[session.bestTrade.sym].label})` : '🏆 Best:  —';
+  const worst = session.worstTrade ? `💔 Worst: -$${Math.abs(session.worstTrade.pnl).toFixed(2)} (${CONFIG.SYMBOLS[session.worstTrade.sym].label})` : '💔 Worst: —';
   return (
     `📊 <b>DAILY SUMMARY — ${new Date().toDateString()}</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
@@ -336,30 +252,24 @@ function buildDailySummary() {
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `<b>By symbol:</b>\n${symRows}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `${bestLine}\n${worstLine}`
+    `${best}\n${worst}`
   );
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  DAILY SUMMARY SCHEDULER
-// ───────────────────────────────────────────────────────────────────
+// ── Daily summary scheduler ──────────────────────────────────────────
 function startDailySummary() {
   let lastSentDate = null;
   setInterval(() => {
-    const now    = new Date();
-    const today  = now.toDateString();
+    const now = new Date(); const today = now.toDateString();
     if (now.getUTCHours() === CONFIG.SUMMARY_HOUR && now.getUTCMinutes() === CONFIG.SUMMARY_MINUTE && lastSentDate !== today) {
       lastSentDate = today;
-      console.log('[SUMMARY] Sending daily summary');
       sendTelegram(buildDailySummary());
       setTimeout(() => resetSession(), 2000);
     }
   }, 60000);
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  TICK PROCESSOR
-// ───────────────────────────────────────────────────────────────────
+// ── Tick processor ───────────────────────────────────────────────────
 function processTick(sym, price) {
   const st  = state[sym];
   const s   = CONFIG.SYMBOLS[sym];
@@ -375,10 +285,12 @@ function processTick(sym, price) {
   const prob       = calcProbability(sym);
   const ticksLeft  = Math.max(st.nextSpike - st.ticks, 0);
   const cooldownOk = now - st.lastSignalAt > CONFIG.SIGNAL_COOLDOWN_MS;
-  const minTicks   = Math.floor(s.period * 0.30);
 
   // ── 1. SPIKE DETECTION ───────────────────────────────────────────
-  if (st.prices.length >= 2 && st.ticks > 30) {
+  // Only count as spike if:
+  //   a) move is 15x the average (genuine spike candle)
+  //   b) minimum ticks have passed (prevents false early resets)
+  if (st.prices.length >= 2 && st.ticks >= s.minSpikeTicks) {
     const move = Math.abs(price - st.prices[st.prices.length - 2]);
 
     if (move > st.avgMove * CONFIG.SPIKE_DETECT_MULTIPLIER) {
@@ -387,32 +299,26 @@ function processTick(sym, price) {
       const hadSignal = st.signalFired;
 
       if (hadSignal && st.entryPrice) {
-        const pnl = parseFloat((move * s.pipValue).toFixed(2));
-        recordWin(sym, pnl);
-        // ── Close trade on MT5 ─────────────────────────────────────
+        recordWin(sym, parseFloat((move * s.pipValue).toFixed(2)));
         sendToPC('CLOSE', sym, 0);
       } else {
         session.missedSpikes++;
       }
 
-      sendTelegram(buildSpikeConfirmMessage(sym, move, st.avgMove, st.ticks, st.entryPrice, hadSignal));
+      console.log(`[SPIKE] ${sym} | move=${move.toFixed(4)} | avg=${st.avgMove.toFixed(4)} | ticks=${st.ticks} | signal=${hadSignal ? 'YES' : 'MISSED'}`);
+      sendTelegram(buildSpikeConfirmMsg(sym, move, st.avgMove, st.ticks, st.entryPrice, hadSignal));
       _resetState(sym);
       return;
     }
 
-    // ── SL check ────────────────────────────────────────────────────
+    // ── SL check ──────────────────────────────────────────────────
     if (st.signalFired && st.entryPrice) {
       const sl    = calcSLTP(sym, st.entryPrice);
       const slHit = s.type === 'boom' ? price <= sl.slPrice : price >= sl.slPrice;
       if (slHit) {
         recordLoss(sym);
         sendToPC('CLOSE', sym, 0);
-        sendTelegram(
-          `🛑 <b>STOP LOSS HIT — ${s.label}</b>\n` +
-          `Loss: -$${CONFIG.RISK_DOLLARS.toFixed(2)}\n` +
-          `Entry: ${st.entryPrice.toFixed(2)} → SL: ${sl.slPrice.toFixed(2)}\n` +
-          `<i>Trade closed on MT5.</i>`
-        );
+        sendTelegram(`🛑 <b>STOP LOSS HIT — ${s.label}</b>\nLoss: -$${CONFIG.RISK_DOLLARS.toFixed(2)}\nEntry: ${st.entryPrice.toFixed(2)} → SL: ${sl.slPrice.toFixed(2)}\n<i>Trade closed on MT5.</i>`);
         _resetState(sym);
         return;
       }
@@ -422,15 +328,15 @@ function processTick(sym, price) {
   // ── 2. EARLY WARNING ─────────────────────────────────────────────
   if (
     ticksLeft <= CONFIG.WARNING_TICKS_OUT && ticksLeft > CONFIG.SIGNAL_TICKS_OUT &&
-    st.ticks > minTicks && !st.warnFired && cooldownOk
+    st.ticks >= s.minSpikeTicks && !st.warnFired && cooldownOk
   ) {
     st.warnFired = true;
-    sendTelegram(buildWarningMessage(sym, prob, ticksLeft), true);
+    sendTelegram(buildWarningMsg(sym, prob, ticksLeft), true);
   }
 
   // ── 3. SPIKE SIGNAL ──────────────────────────────────────────────
   const tickTrigger = ticksLeft <= CONFIG.SIGNAL_TICKS_OUT && ticksLeft > 0;
-  const probTrigger = prob >= CONFIG.PROB_OVERRIDE_THRESHOLD && st.ticks > minTicks;
+  const probTrigger = prob >= CONFIG.PROB_OVERRIDE_THRESHOLD && st.ticks >= s.minSpikeTicks;
 
   if ((tickTrigger || probTrigger) && !st.signalFired && cooldownOk) {
     st.signalFired  = true;
@@ -439,35 +345,31 @@ function processTick(sym, price) {
     session.signals++;
     session.bySymbol[sym].signals++;
 
-    const sl      = calcSLTP(sym, price);
-    const trigger = probTrigger && !tickTrigger ? 'prob' : 'tick';
-
-    // ── Send trade to MT5 via PC ───────────────────────────────────
-    const action = s.type === 'boom' ? 'BUY' : 'SELL';
+    const sl        = calcSLTP(sym, price);
+    const trigger   = probTrigger && !tickTrigger ? 'prob' : 'tick';
+    const action    = s.type === 'boom' ? 'BUY' : 'SELL';
     const autoTrade = !!CONFIG.PC_SERVER_URL;
     if (autoTrade) sendToPC(action, sym, sl.slPrice);
 
-    console.log(`[SIGNAL] ${sym} | prob=${prob}% | trigger=${trigger} | autoTrade=${autoTrade}`);
-    sendTelegram(buildSignalMessage(sym, prob, ticksLeft, price, sl, trigger, autoTrade));
+    console.log(`[SIGNAL] ${sym} | prob=${prob}% | ticks=${st.ticks} | trigger=${trigger}`);
+    sendTelegram(buildSignalMsg(sym, prob, ticksLeft, price, sl, trigger, autoTrade));
   }
 
-  // ── 4. SAFETY RESET ──────────────────────────────────────────────
-  if (st.ticks > st.nextSpike * 1.6) {
+  // ── 4. SAFETY RESET — only past 1.8x expected window ────────────
+  if (st.ticks > st.nextSpike * 1.8) {
+    console.log(`[RESET] ${sym} — way past window (ticks=${st.ticks}, expected=${st.nextSpike})`);
     _resetState(sym);
   }
 }
 
 function _resetState(sym) {
-  const s  = CONFIG.SYMBOLS[sym];
-  const st = state[sym];
+  const s = CONFIG.SYMBOLS[sym]; const st = state[sym];
   st.ticks = 0; st.nextSpike = _randSpike(s.period, st.spikeHistory);
   st.signalFired = false; st.warnFired = false; st.entryPrice = null;
   console.log(`[STATE] ${sym} reset | nextSpike ~${st.nextSpike}`);
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  DERIV WEBSOCKET
-// ───────────────────────────────────────────────────────────────────
+// ── Deriv WebSocket ──────────────────────────────────────────────────
 function connectDeriv(sym) {
   const st = state[sym];
   if (st.ws) try { st.ws.terminate(); } catch (_) {}
@@ -479,22 +381,19 @@ function connectDeriv(sym) {
       const msg = JSON.parse(raw);
       if (msg.error) { console.error(`[Deriv] ${sym}:`, msg.error.message); return; }
       if (msg.msg_type === 'tick' && msg.tick) processTick(sym, parseFloat(msg.tick.quote));
-    } catch (err) { console.error(`[Parse] ${sym}:`, err.message); }
+    } catch (e) { console.error(`[Parse] ${sym}:`, e.message); }
   });
-  ws.on('close', code => { st.connected = false; console.log(`[WS] ${sym} closed — reconnecting`); setTimeout(() => connectDeriv(sym), 5000); });
-  ws.on('error', err => { console.error(`[WS error] ${sym}:`, err.message); st.connected = false; });
+  ws.on('close', code => { st.connected = false; setTimeout(() => connectDeriv(sym), 5000); });
+  ws.on('error', err => { console.error(`[WS] ${sym}:`, err.message); st.connected = false; });
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  HEARTBEAT
-// ───────────────────────────────────────────────────────────────────
+// ── Heartbeat ────────────────────────────────────────────────────────
 function startHeartbeat() {
   setInterval(() => {
     console.log('\n── STATUS ──────────────────────────────');
     Object.keys(CONFIG.SYMBOLS).forEach(sym => {
-      const st = state[sym]; const s = CONFIG.SYMBOLS[sym];
-      const prob = calcProbability(sym);
-      console.log(`${st.connected ? '🟢' : '🔴'} ${s.label.padEnd(12)} | ticks: ${String(st.ticks).padStart(4)}/${st.nextSpike} | RSI: ${String(st.rsi).padStart(5)} | prob: ${String(prob).padStart(4)}%`);
+      const st = state[sym]; const s = CONFIG.SYMBOLS[sym]; const prob = calcProbability(sym);
+      console.log(`${st.connected ? '🟢' : '🔴'} ${s.label.padEnd(12)} | ticks: ${String(st.ticks).padStart(4)}/${st.nextSpike} | RSI: ${String(st.rsi).padStart(5)} | prob: ${String(prob).padStart(4)}% | minGuard: ${st.ticks >= s.minSpikeTicks ? '✅' : `❌(${s.minSpikeTicks - st.ticks} left)`}`);
     });
     const wr = (session.wins + session.losses) > 0 ? ((session.wins / (session.wins + session.losses)) * 100).toFixed(1) + '%' : '—';
     console.log(`📊 Today: ${session.signals} signals | ${session.wins}W/${session.losses}L | WR:${wr} | P&L:$${session.totalPnl.toFixed(2)}`);
@@ -502,21 +401,21 @@ function startHeartbeat() {
   }, 30000);
 }
 
-// ───────────────────────────────────────────────────────────────────
-//  STARTUP
-// ───────────────────────────────────────────────────────────────────
+// ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash Spike Detector  v2.3');
+console.log('  Boom & Crash Spike Detector  v2.4');
 console.log('════════════════════════════════════════');
-console.log(`PC Server  : ${CONFIG.PC_SERVER_URL || 'NOT SET — manual trading only'}`);
-console.log(`Summary at : ${CONFIG.SUMMARY_HOUR}:${String(CONFIG.SUMMARY_MINUTE).padStart(2,'0')} UTC`);
+console.log(`PC Server  : ${CONFIG.PC_SERVER_URL || 'NOT SET'}`);
+console.log(`Spike guard: 15x avg move + min tick guard per symbol`);
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash Spike Detector v2.3 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash Spike Detector v2.4 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
-  `🤖 Auto-trade: ${CONFIG.PC_SERVER_URL ? '✅ Connected to MT5' : '⚠️ PC_SERVER_URL not set yet'}\n` +
+  `🔧 Fix: Spike detection threshold raised (15x avg)\n` +
+  `🔧 Fix: Min tick guard prevents false resets\n` +
+  `🤖 Auto-trade: ${CONFIG.PC_SERVER_URL ? '✅ MT5 connected' : '⚠️ PC_SERVER_URL not set'}\n` +
   `🛑 SL risk: $${CONFIG.RISK_DOLLARS} per trade\n` +
   `📊 Daily summary: ${CONFIG.SUMMARY_HOUR}:${String(CONFIG.SUMMARY_MINUTE).padStart(2,'0')} UTC\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
