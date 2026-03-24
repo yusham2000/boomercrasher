@@ -2,8 +2,8 @@
   "name": "boom-crash-spike-detector",
   "version": "2.3.0",
   "description": "Boom & Crash detector with MT5 auto-trading via PC server",
-  "main": "bot.js",
-  "scripts": { "start": "node bot.js" },
+  "main": "bot_fixed.js",
+  "scripts": { "start": "node bot_fixed.js" },
   "dependencies": { "ws": "^8.17.1" },
   "engines": { "node": ">=18.0.0" }
 }

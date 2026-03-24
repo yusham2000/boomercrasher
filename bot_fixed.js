@@ -22,7 +22,8 @@ const CONFIG = {
   TP_TICKS:           null,
   SIGNAL_TICKS_OUT:   20,
   WARNING_TICKS_OUT:  60,
-  SIGNAL_COOLDOWN_MS: 15000,
+  SIGNAL_COOLDOWN_MS: 90000,
+  PROB_OVERRIDE_THRESHOLD: 80,
   SUMMARY_HOUR:       21,
   SUMMARY_MINUTE:     0,
 };
@@ -264,7 +265,10 @@ function processTick(sym, price) {
   }
 
   // ── SIGNAL ───────────────────────────────────────────────────────
-  if (ticksLeft <= CONFIG.SIGNAL_TICKS_OUT && ticksLeft > 0 && !st.signalFired && cooldownOk) {
+  const tickTrigger = ticksLeft <= CONFIG.SIGNAL_TICKS_OUT && ticksLeft > 0;
+  const probTrigger = prob >= CONFIG.PROB_OVERRIDE_THRESHOLD && st.ticks > 30;
+  
+  if ((tickTrigger || probTrigger) && !st.signalFired && cooldownOk) {
     st.signalFired  = true;
     st.entryPrice   = price;
     st.lastSignalAt = now;
@@ -274,7 +278,8 @@ function processTick(sym, price) {
     const action    = s.type === 'boom' ? 'BUY' : 'SELL';
     const autoTrade = !!CONFIG.PC_SERVER_URL;
     if (autoTrade) sendToPC(action, sym, sl.slPrice);
-    console.log(`[SIGNAL] ${sym} | prob=${prob}% | ticks=${st.ticks} | ticksLeft=${ticksLeft}`);
+    const trigger = probTrigger && !tickTrigger ? 'prob' : 'tick';
+    console.log(`[SIGNAL] ${sym} | prob=${prob}% | ticks=${st.ticks} | trigger=${trigger} | ticksLeft=${ticksLeft}`);
     sendTelegram(buildSignalMsg(sym, prob, ticksLeft, price, sl, autoTrade));
   }
 
