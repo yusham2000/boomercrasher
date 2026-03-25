@@ -1,0 +1,2 @@
+pyTelegramBotAPI==13.7
+pywin32==306

@@ -1,7 +1,7 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH SPIKE DETECTOR — v2.1
+//  BOOM & CRASH SPIKE DETECTOR — v2.2
 //  Signals fire ~20 ticks before expected spike
 //  Adaptive spike memory — learns real intervals over time
 //  Includes SL ($1.50 risk) and TP (exit after spike confirmed)
@@ -11,6 +11,36 @@
 
 const WebSocket = require('ws');
 const https     = require('https');
+const fs        = require('fs');
+const path      = require('path');
+
+// ───────────────────────────────────────────────────────────────────
+//  PERSISTENT MEMORY — spike history saved to disk, survives restarts
+// ───────────────────────────────────────────────────────────────────
+const MEMORY_FILE = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || '.', 'spike_memory.json');
+
+function loadMemory() {
+  try {
+    if (fs.existsSync(MEMORY_FILE)) {
+      const data = JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
+      console.log('[MEMORY] Loaded spike history:', JSON.stringify(data));
+      return data;
+    }
+  } catch (e) { console.error('[MEMORY] Load error:', e.message); }
+  return {};
+}
+
+function saveMemory() {
+  try {
+    const data = {};
+    Object.keys(CONFIG.SYMBOLS).forEach(sym => {
+      if (state[sym] && state[sym].spikeHistory.length > 0) {
+        data[sym] = state[sym].spikeHistory.slice(-20);
+      }
+    });
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
+  } catch (e) { console.error('[MEMORY] Save error:', e.message); }
+}
 
 // ───────────────────────────────────────────────────────────────────
 //  CONFIGURATION — edit these values to tune the bot
@@ -49,7 +79,7 @@ const CONFIG = {
   SPIKE_DETECT_MULTIPLIER:  5,   // move must be X times avg move to count as spike
 
   // ── Cooldown between signals per symbol (ms) ──────────────────────
-  SIGNAL_COOLDOWN_MS: 90000,
+  SIGNAL_COOLDOWN_MS: 15000,
 };
 
 // ───────────────────────────────────────────────────────────────────
@@ -72,6 +102,7 @@ function _randSpike(period, history) {
 // ───────────────────────────────────────────────────────────────────
 //  STATE — one object per symbol
 // ───────────────────────────────────────────────────────────────────
+const _savedMemory = loadMemory();
 const state = {};
 Object.keys(CONFIG.SYMBOLS).forEach(sym => {
   const s = CONFIG.SYMBOLS[sym];
@@ -86,7 +117,7 @@ Object.keys(CONFIG.SYMBOLS).forEach(sym => {
     lastSignalAt:  0,
     lastPrice:     null,
     entryPrice:    null,  // price when signal fired (for SL/TP)
-    spikeHistory:  [],    // real observed tick intervals — grows over time
+    spikeHistory:  _savedMemory[sym] || [],    // loaded from disk on startup
     missedSpikes:  0,     // spikes that happened without a signal
     connected:     false,
     ws:            null,
@@ -306,13 +337,13 @@ function buildStartupMessage() {
   const syms   = Object.values(CONFIG.SYMBOLS).map(s => s.label).join(', ');
   const tpMode = CONFIG.TP_TICKS ? `Fixed ${CONFIG.TP_TICKS} ticks` : 'Exit on spike confirmation';
   return (
-    `🤖 <b>Boom & Crash Spike Detector v2.1 — ONLINE</b>\n` +
+    `🤖 <b>Boom & Crash Spike Detector v2.2 — ONLINE</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `📡 <b>Monitoring:</b> ${syms}\n` +
     `⚡ <b>Signal fires at:</b> ~${CONFIG.SIGNAL_TICKS_OUT} ticks OR prob ≥ ${CONFIG.PROB_OVERRIDE_THRESHOLD}%\n` +
     `🛑 <b>SL risk per trade:</b> $${CONFIG.RISK_DOLLARS.toFixed(2)}\n` +
     `💰 <b>TP mode:</b> ${tpMode}\n` +
-    `🧠 <b>Adaptive:</b> Bot learns real spike intervals over time\n` +
+    `🧠 <b>Adaptive:</b> Spike memory persists across restarts\n` +
     `📊 <b>Data source:</b> Deriv live ticks\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `<i>Scanning for spike patterns...</i>` 
@@ -349,6 +380,7 @@ function processTick(sym, price) {
       // Record real interval into adaptive history
       st.spikeHistory.push(st.ticks);
       if (st.spikeHistory.length > 20) st.spikeHistory.shift();
+      saveMemory(); // persist to disk
 
       const hadSignal = st.signalFired;
       if (!hadSignal) st.missedSpikes++;
@@ -495,7 +527,7 @@ function startHeartbeat() {
 //  STARTUP
 // ───────────────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash Spike Detector  v2.1');
+console.log('  Boom & Crash Spike Detector  v2.2');
 console.log('════════════════════════════════════════');
 console.log(`Symbols   : ${Object.keys(CONFIG.SYMBOLS).join(', ')}`);
 console.log(`Signal at : ${CONFIG.SIGNAL_TICKS_OUT} ticks | prob override ≥ ${CONFIG.PROB_OVERRIDE_THRESHOLD}%`);
