@@ -16,7 +16,7 @@ const CONFIG = {
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || 'YOUR_CHAT_ID_HERE',
   DERIV_APP_ID:     process.env.DERIV_APP_ID     || '1089',
   DERIV_API_TOKEN:  process.env.DERIV_API_TOKEN  || '',
-  DERIV_WS:         'wss://ws.binaryws.com/websockets/v3',
+  DERIV_WS:         'wss://ws.derivws.com/websockets/v3',
 
   SYMBOLS: {
     'BOOM1000':  { label: 'Boom 1000',  type: 'boom',  period: 1000, direction: 'UP 📈',   stake: 0.35, contract: 'CALL' },
@@ -149,8 +149,9 @@ function connectTradeWs() {
 
       if (msg.msg_type === 'authorize') {
         if (msg.error) {
-          console.error('[TRADE] Auth failed:', msg.error.message);
-          sendTelegram('⚠️ <b>Deriv auth failed</b> — check DERIV_API_TOKEN');
+          console.error('[TRADE] Auth failed - full error:', JSON.stringify(msg.error));
+          console.error('[TRADE] Token used (first 5 chars):', CONFIG.DERIV_API_TOKEN.substring(0,5));
+          sendTelegram(`⚠️ <b>Deriv auth failed</b>\nError: ${msg.error.message}\nCode: ${msg.error.code}`);
           return;
         }
         authorized   = true;
