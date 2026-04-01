@@ -1,7 +1,7 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH ALL-IN-ONE BOT — v3.3
+//  BOOM & CRASH ALL-IN-ONE BOT — v3.4
 //  Detects spikes + Places trades directly on Deriv + Telegram alerts
 //  Persistent memory across restarts + Daily summary
 // ═══════════════════════════════════════════════════════════════════
@@ -218,7 +218,8 @@ function placeTrade(sym, entryPrice) {
     return;
   }
   const s            = CONFIG.SYMBOLS[sym];
-  const contractType = s.type === 'boom' ? 'TICKSHIGH' : 'TICKSLOW';
+  // CALL = price rises (Boom), PUT = price falls (Crash)
+  const contractType = s.type === 'boom' ? 'CALL' : 'PUT';
   console.log(`[TRADE] Placing ${contractType} on ${sym} stake=$${CONFIG.STAKE}`);
   tradeWs.send(JSON.stringify({
     proposal:      1,
@@ -227,7 +228,7 @@ function placeTrade(sym, entryPrice) {
     contract_type: contractType,
     currency:      'USD',
     symbol:        sym,
-    duration:      1,
+    duration:      5,
     duration_unit: 't',
   }));
 }
@@ -543,7 +544,7 @@ function startHeartbeat() {
 
 // ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash All-in-One Bot  v3.3');
+console.log('  Boom & Crash All-in-One Bot  v3.4');
 console.log('════════════════════════════════════════');
 console.log(`Trading  : ${CONFIG.DERIV_API_TOKEN ? 'Deriv API ✅' : 'Disabled — no token'}`);
 console.log(`Stake    : $${CONFIG.STAKE} per trade`);
@@ -551,7 +552,7 @@ console.log(`Memory   : ${Object.keys(_savedMemory).length} symbols loaded from 
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash All-in-One Bot v3.3 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash All-in-One Bot v3.4 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
   `🤖 Auto-trade: ${CONFIG.DERIV_API_TOKEN ? '✅ Deriv API connected' : '⚠️ No API token — signals only'}\n` +
