@@ -1,7 +1,7 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH ALL-IN-ONE BOT — v3.2
+//  BOOM & CRASH ALL-IN-ONE BOT — v3.3
 //  Detects spikes + Places trades directly on Deriv + Telegram alerts
 //  Persistent memory across restarts + Daily summary
 // ═══════════════════════════════════════════════════════════════════
@@ -481,20 +481,47 @@ function _resetState(sym) {
 }
 
 // ── Deriv tick WebSocket ─────────────────────────────────────────────
+// Each symbol gets its own WS connection — subscribe after connect
 function connectDeriv(sym) {
   const st = state[sym];
   if (st.ws) try { st.ws.terminate(); } catch (_) {}
+
   const ws = new WebSocket(`${CONFIG.DERIV_WS}?app_id=${CONFIG.DERIV_APP_ID}`);
   st.ws = ws;
-  ws.on('open', () => { st.connected = true; console.log(`[WS] Connected — ${sym}`); ws.send(JSON.stringify({ ticks: sym, subscribe: 1 })); });
+
+  ws.on('open', () => {
+    st.connected = true;
+    console.log(`[WS] Connected — ${sym}`);
+    // If we have an API token, authorize first then subscribe
+    if (CONFIG.DERIV_API_TOKEN) {
+      ws.send(JSON.stringify({ authorize: CONFIG.DERIV_API_TOKEN }));
+    } else {
+      ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+    }
+  });
+
   ws.on('message', raw => {
     try {
       const msg = JSON.parse(raw);
-      if (msg.error) { console.error(`[Deriv] ${sym}:`, msg.error.message); return; }
-      if (msg.msg_type === 'tick' && msg.tick) processTick(sym, parseFloat(msg.tick.quote));
+      if (msg.error) {
+        console.error(`[Deriv] ${sym}:`, msg.error.message);
+        return;
+      }
+      // After auth on tick WS, subscribe to ticks
+      if (msg.msg_type === 'authorize') {
+        ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+      }
+      if (msg.msg_type === 'tick' && msg.tick) {
+        processTick(sym, parseFloat(msg.tick.quote));
+      }
     } catch (e) { console.error(`[Parse] ${sym}:`, e.message); }
   });
-  ws.on('close', code => { st.connected = false; setTimeout(() => connectDeriv(sym), 5000); });
+
+  ws.on('close', code => {
+    st.connected = false;
+    console.log(`[WS] ${sym} closed — reconnecting in 5s`);
+    setTimeout(() => connectDeriv(sym), 5000);
+  });
   ws.on('error', err => { console.error(`[WS] ${sym}:`, err.message); st.connected = false; });
 }
 
@@ -516,7 +543,7 @@ function startHeartbeat() {
 
 // ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash All-in-One Bot  v3.2');
+console.log('  Boom & Crash All-in-One Bot  v3.3');
 console.log('════════════════════════════════════════');
 console.log(`Trading  : ${CONFIG.DERIV_API_TOKEN ? 'Deriv API ✅' : 'Disabled — no token'}`);
 console.log(`Stake    : $${CONFIG.STAKE} per trade`);
@@ -524,7 +551,7 @@ console.log(`Memory   : ${Object.keys(_savedMemory).length} symbols loaded from 
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash All-in-One Bot v3.2 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash All-in-One Bot v3.3 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
   `🤖 Auto-trade: ${CONFIG.DERIV_API_TOKEN ? '✅ Deriv API connected' : '⚠️ No API token — signals only'}\n` +
