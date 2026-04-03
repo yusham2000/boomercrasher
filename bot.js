@@ -1,7 +1,7 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH ALL-IN-ONE BOT — v3.5
+//  BOOM & CRASH ALL-IN-ONE BOT — v3.6
 //  Detects spikes + Places trades directly on Deriv + Telegram alerts
 //  Persistent memory across restarts + Daily summary
 // ═══════════════════════════════════════════════════════════════════
@@ -224,8 +224,9 @@ function placeTrade(sym, entryPrice) {
     return;
   }
   const s            = CONFIG.SYMBOLS[sym];
-  // CALL = price rises (Boom), PUT = price falls (Crash)
-  const contractType = s.type === 'boom' ? 'CALL' : 'PUT';
+  // Boom & Crash on Deriv web = Multipliers contract type
+  // MULTUP = profit when price rises (Boom), MULTDOWN = profit when price falls (Crash)
+  const contractType = s.type === 'boom' ? 'MULTUP' : 'MULTDOWN';
   console.log(`[TRADE] Placing ${contractType} on ${sym} stake=$${CONFIG.STAKE} | wsReady=${tradeWsReady} | auth=${authorized}`);
   const proposal = {
     proposal:      1,
@@ -234,8 +235,7 @@ function placeTrade(sym, entryPrice) {
     contract_type: contractType,
     currency:      'USD',
     symbol:        sym,
-    duration:      5,
-    duration_unit: 't',
+    multiplier:    100,
   };
   console.log('[TRADE] Proposal request:', JSON.stringify(proposal));
   tradeWs.send(JSON.stringify(proposal));
@@ -552,7 +552,7 @@ function startHeartbeat() {
 
 // ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash All-in-One Bot  v3.5');
+console.log('  Boom & Crash All-in-One Bot  v3.6');
 console.log('════════════════════════════════════════');
 console.log(`Trading  : ${CONFIG.DERIV_API_TOKEN ? 'Deriv API ✅' : 'Disabled — no token'}`);
 console.log(`Stake    : $${CONFIG.STAKE} per trade`);
@@ -560,7 +560,7 @@ console.log(`Memory   : ${Object.keys(_savedMemory).length} symbols loaded from 
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash All-in-One Bot v3.5 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash All-in-One Bot v3.6 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
   `🤖 Auto-trade: ${CONFIG.DERIV_API_TOKEN ? '✅ Deriv API connected' : '⚠️ No API token — signals only'}\n` +
