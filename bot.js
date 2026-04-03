@@ -1,7 +1,7 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH ALL-IN-ONE BOT — v3.4
+//  BOOM & CRASH ALL-IN-ONE BOT — v3.5
 //  Detects spikes + Places trades directly on Deriv + Telegram alerts
 //  Persistent memory across restarts + Daily summary
 // ═══════════════════════════════════════════════════════════════════
@@ -172,7 +172,7 @@ function connectTradeWs() {
 
       if (msg.msg_type === 'buy') {
         if (msg.error) {
-          console.error('[TRADE] Buy error:', msg.error.message);
+          console.error('[TRADE] Buy error full:', JSON.stringify(msg.error));
           sendTelegram(`⚠️ <b>Trade failed</b>\n${msg.error.message}`);
           return;
         }
@@ -192,8 +192,14 @@ function connectTradeWs() {
       }
 
       if (msg.msg_type === 'proposal') {
-        if (msg.error) { console.error('[TRADE] Proposal error:', msg.error.message); return; }
-        tradeWs.send(JSON.stringify({ buy: msg.proposal.id, price: msg.proposal.ask_price }));
+        if (msg.error) {
+          console.error('[TRADE] Proposal error full:', JSON.stringify(msg.error));
+          return;
+        }
+        console.log(`[TRADE] Proposal received | id=${msg.proposal.id} | ask=${msg.proposal.ask_price} | payout=${msg.proposal.payout}`);
+        const buyMsg = { buy: msg.proposal.id, price: msg.proposal.ask_price };
+        console.log('[TRADE] Sending buy:', JSON.stringify(buyMsg));
+        tradeWs.send(JSON.stringify(buyMsg));
       }
 
     } catch (e) { console.error('[TRADE WS parse]', e.message); }
@@ -220,8 +226,8 @@ function placeTrade(sym, entryPrice) {
   const s            = CONFIG.SYMBOLS[sym];
   // CALL = price rises (Boom), PUT = price falls (Crash)
   const contractType = s.type === 'boom' ? 'CALL' : 'PUT';
-  console.log(`[TRADE] Placing ${contractType} on ${sym} stake=$${CONFIG.STAKE}`);
-  tradeWs.send(JSON.stringify({
+  console.log(`[TRADE] Placing ${contractType} on ${sym} stake=$${CONFIG.STAKE} | wsReady=${tradeWsReady} | auth=${authorized}`);
+  const proposal = {
     proposal:      1,
     amount:        CONFIG.STAKE,
     basis:         'stake',
@@ -230,7 +236,9 @@ function placeTrade(sym, entryPrice) {
     symbol:        sym,
     duration:      5,
     duration_unit: 't',
-  }));
+  };
+  console.log('[TRADE] Proposal request:', JSON.stringify(proposal));
+  tradeWs.send(JSON.stringify(proposal));
 }
 
 // ── Close trade ──────────────────────────────────────────────────────
@@ -544,7 +552,7 @@ function startHeartbeat() {
 
 // ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash All-in-One Bot  v3.4');
+console.log('  Boom & Crash All-in-One Bot  v3.5');
 console.log('════════════════════════════════════════');
 console.log(`Trading  : ${CONFIG.DERIV_API_TOKEN ? 'Deriv API ✅' : 'Disabled — no token'}`);
 console.log(`Stake    : $${CONFIG.STAKE} per trade`);
@@ -552,7 +560,7 @@ console.log(`Memory   : ${Object.keys(_savedMemory).length} symbols loaded from 
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash All-in-One Bot v3.4 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash All-in-One Bot v3.5 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
   `🤖 Auto-trade: ${CONFIG.DERIV_API_TOKEN ? '✅ Deriv API connected' : '⚠️ No API token — signals only'}\n` +
