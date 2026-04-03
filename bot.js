@@ -1,7 +1,7 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════
-//  BOOM & CRASH ALL-IN-ONE BOT — v3.6
+//  BOOM & CRASH ALL-IN-ONE BOT — v3.8
 //  Detects spikes + Places trades directly on Deriv + Telegram alerts
 //  Persistent memory across restarts + Daily summary
 // ═══════════════════════════════════════════════════════════════════
@@ -25,7 +25,7 @@ const CONFIG = {
     'CRASH500':  { label: 'Crash 500',  type: 'crash', period: 500,  direction: 'DOWN 📉', pipValue: 0.10 },
   },
 
-  STAKE:                   0.35,   // minimum Deriv stake
+  STAKE:                   1.00,   // minimum Deriv stake
   RISK_DOLLARS:            1.50,   // max loss per trade ($1.50 SL)
   SIGNAL_TICKS_OUT:        20,
   WARNING_TICKS_OUT:       60,
@@ -236,6 +236,9 @@ function placeTrade(sym, entryPrice) {
     currency:      'USD',
     symbol:        sym,
     multiplier:    100,
+    limit_order: {
+      stop_loss: CONFIG.RISK_DOLLARS,  // $1.50 SL set on Deriv side
+    },
   };
   console.log('[TRADE] Proposal request:', JSON.stringify(proposal));
   tradeWs.send(JSON.stringify(proposal));
@@ -552,7 +555,7 @@ function startHeartbeat() {
 
 // ── Startup ──────────────────────────────────────────────────────────
 console.log('════════════════════════════════════════');
-console.log('  Boom & Crash All-in-One Bot  v3.6');
+console.log('  Boom & Crash All-in-One Bot  v3.8');
 console.log('════════════════════════════════════════');
 console.log(`Trading  : ${CONFIG.DERIV_API_TOKEN ? 'Deriv API ✅' : 'Disabled — no token'}`);
 console.log(`Stake    : $${CONFIG.STAKE} per trade`);
@@ -560,7 +563,7 @@ console.log(`Memory   : ${Object.keys(_savedMemory).length} symbols loaded from 
 console.log('════════════════════════════════════════\n');
 
 sendTelegram(
-  `🤖 <b>Boom & Crash All-in-One Bot v3.6 — ONLINE</b>\n` +
+  `🤖 <b>Boom & Crash All-in-One Bot v3.8 — ONLINE</b>\n` +
   `━━━━━━━━━━━━━━━━━━━━━━\n` +
   `📡 Monitoring: All 4 Boom & Crash indices\n` +
   `🤖 Auto-trade: ${CONFIG.DERIV_API_TOKEN ? '✅ Deriv API connected' : '⚠️ No API token — signals only'}\n` +
